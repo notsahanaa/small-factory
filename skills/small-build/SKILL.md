@@ -208,31 +208,40 @@ Run all checks manually before committing.
 <full body of principles.md if loaded>
 
 ## Schema rule (only if this ticket touches the DB)
-DB tooling: {{config.db.tooling}}
+DB tooling:           {{config.db.tooling}}
+Migration create cmd: {{config.db.migration_create}}    (blank → hand-write fallback)
 
+If tooling is "none":
+  No schema work to coordinate.
+
+Else if migration_create is set:
+  1. Choose a descriptive snake_case <slug> for this migration (e.g. "add_user_invites").
+  2. Run the configured creation command, replacing the literal "<slug>" with your slug:
+       {{config.db.migration_create}}
+     (For Prisma this is typically `prisma migrate dev --create-only --name <slug>`,
+     which writes the migration file but does NOT apply it — exactly what we want.
+     For other tools the config defines the equivalent.)
+  3. Inspect the generated migration file. Edit if needed to make it correct
+     and idempotent. Keep the file exactly where the tool wrote it.
+  4. Run the client/codegen step so types match the new schema:
+       {{config.db.client_generate}}
+  5. Do NOT apply the migration. The orchestrator applies via
+     {{config.db.migrate_apply}} from the main checkout after cherry-pick.
+
+Else (migration_create is blank — fall back to hand-writing the file):
   If tooling is "prisma":
-    Do NOT run `prisma migrate dev`. Hand-write the migration SQL:
-      prisma/migrations/<YYYYMMDDHHMMSS>_<slug>/migration.sql
-    Do NOT apply it — the orchestrator applies via {{config.db.migrate_apply}} after
-    cherry-pick. After writing, run: {{config.db.client_generate}}
-
+    Write migration SQL to prisma/migrations/<YYYYMMDDHHMMSS>_<slug>/migration.sql.
+    After writing, run: {{config.db.client_generate}}.
   If tooling is "supabase":
-    Write migration SQL to supabase/migrations/<YYYYMMDDHHMMSS>_<slug>.sql
-    Do NOT apply — orchestrator applies after cherry-pick.
-
+    Write migration SQL to supabase/migrations/<YYYYMMDDHHMMSS>_<slug>.sql.
   If tooling is "alembic":
-    Hand-write the migration revision file under your alembic versions dir.
-    Do NOT run `alembic upgrade` — orchestrator runs it after cherry-pick.
-
+    Hand-write the migration revision file under the alembic versions dir.
   If tooling is "sqlc":
-    Update the SQL files. Do NOT regenerate Go code in the worktree;
-    orchestrator runs {{config.db.client_generate}} after cherry-pick.
-
+    Update the SQL files. The orchestrator runs {{config.db.client_generate}}
+    after cherry-pick.
   If tooling is "raw_sql":
-    Follow project conventions. Do not apply migrations in the worktree.
-
-  If tooling is "none":
-    No schema work to coordinate.
+    Follow project conventions.
+  Do NOT apply the migration — orchestrator handles apply per ship.mode.
 
 Worktree rule reminder: {{config.db.worktree_rule}}
 
@@ -626,8 +635,11 @@ Run all checks manually before committing.
 
 **DB advisory lock across worktrees (Prisma)**
 *Applies to: Prisma only.*
-Never run `prisma migrate dev` in a worktree.
-Hand-write SQL, apply via `{{config.db.migrate_apply}}` from main checkout only.
+Never run plain `prisma migrate dev` in a worktree — it takes a DB advisory
+lock that conflicts with sibling worktrees. Use `prisma migrate dev
+--create-only` (which only writes the migration file and does not connect
+to the DB) — that's what `config.db.migration_create` defaults to. Apply
+via `{{config.db.migrate_apply}}` from the main checkout only.
 
 **Cherry-pick conflicts in docblocks**
 *Applies to: every stack.*
