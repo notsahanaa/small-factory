@@ -234,10 +234,17 @@ The questions:
    Blank is fine — a generic message will be shown.
 
 3. Default target branch when you ship (used only in ship.mode = builtin)?
-   Options: main / staging / dev / other   [default: staging]
+   Options: main / staging / dev / other
+   [no default — pick one]
    → [user picks]
    (Only consulted by builtin mode. In handoff mode this field is still
-    written but unused.)
+    written but unused. If you're in handoff mode you can pick any
+    plausible value — it's not exercised.)
+
+   When presenting the choice, suppress any option whose remote branch
+   does not exist on `origin` (e.g. don't offer `staging` if
+   `git ls-remote --heads origin staging` returns empty). Always include
+   `main`/`master` (whichever is the anchor) and `other` regardless.
 
 4. Branch prefix format?
    "<initials>/"  (e.g. dan/issue-547-people-db)
@@ -330,7 +337,7 @@ ship:
 
 branches:
   anchor: main                                # detected from origin/HEAD
-  target: staging                             # used only when ship.mode = builtin
+  target: <user-picked>                       # used only when ship.mode = builtin; no default
   prefix_format: "<initials>/"                # or "" for no prefix
   initials: "dan"                             # used in prefix; omit if no prefix
 
