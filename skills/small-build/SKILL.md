@@ -53,13 +53,15 @@ From the config you will use:
 
 - `commands.package_manager`, `commands.install`, `commands.test`, `commands.lint`,
   `commands.typecheck`, `commands.build` — for agent prompts and validation
-- `db.tooling`, `db.migrate_apply`, `db.client_generate`, `db.worktree_rule` — for
-  schema handling
+- `db.tooling`, `db.migration_create`, `db.migrate_apply`, `db.client_generate`,
+  `db.worktree_rule` — for schema handling
 - `worktree.node_modules_strategy`, `worktree.cache_clear` — for worktree setup
   and post-merge cache hygiene
 - `verification_gates` — the ordered list of gates that must pass before commit
 - `commit_format` — the commit message template
-- `branches.anchor` — the branch to cherry-pick onto
+- `branches.anchor` — the branch to cherry-pick onto in `ship.mode = builtin`
+- `ship.mode`, `ship.handoff_command` — selects between pushing to anchor
+  (builtin) and stopping at code-complete on the current branch (handoff)
 
 Also load project principles if present:
 ```bash
@@ -104,15 +106,32 @@ Only process sub-issues in **Todo** status. Skip everything else.
 
 Group into Wave 1, Wave 2, Wave 3.
 
-### Step 2 — Verify anchor branch
+### Step 2 — Resolve cherry-pick base
+
+The cherry-pick base depends on `ship.mode`:
 
 ```bash
-git checkout <config.branches.anchor>
-git pull origin <config.branches.anchor>
-git log -1 --oneline
+if [[ "{{config.ship.mode}}" == "handoff" ]]; then
+  CHERRY_BASE=$(git branch --show-current)
+  if [[ "$CHERRY_BASE" == "{{config.branches.anchor}}" ]]; then
+    echo "✗ Refusing to build directly on anchor branch ({{config.branches.anchor}}) in handoff mode."
+    echo "  In handoff mode, Build cherry-picks onto the current feature branch."
+    echo "  Run Spec first to create a feature branch, or 'git checkout' an existing one."
+    exit 1
+  fi
+  # Don't pull — the user owns this branch and may have local-only commits.
+  git log -1 --oneline
+else
+  CHERRY_BASE="{{config.branches.anchor}}"
+  git checkout "$CHERRY_BASE"
+  git pull origin "$CHERRY_BASE"
+  git log -1 --oneline
+fi
 ```
 
-Record the HEAD commit hash. Every agent worktree must start from this exact hash.
+Record the HEAD commit hash. Every agent worktree must start from this exact
+hash. In builtin mode `$CHERRY_BASE` equals the configured anchor branch; in
+handoff mode it's the current feature branch.
 
 ### Step 3 — Dispatch agents by wave
 
@@ -156,8 +175,8 @@ Scope: <verbatim scope — these are the files/components you should focus on>
 Acceptance: <verbatim acceptance criteria>
 
 ## Branch setup
-Anchor branch: {{config.branches.anchor}}
-Expected HEAD: <commit hash>
+Cherry-pick base: {{cherry_base}}            # the branch your commit will be cherry-picked onto
+Expected HEAD:    <commit hash>
 
 First, verify your worktree is at the right base:
   git log -1 --oneline
@@ -282,12 +301,14 @@ mcp__linear__save_comment
   body="⚠ Build blocker on <issue-id> (<title>) — <one line summary of blocker>. See sub-issue for details."
 ```
 
-### Step 5 — Cherry-pick to anchor branch
+### Step 5 — Cherry-pick to the resolved base
 
-Cherry-pick in wave order, then by issue ID within each wave (lowest ID first):
+Cherry-pick in wave order, then by issue ID within each wave (lowest ID first).
+The base is `$CHERRY_BASE` from Step 2 — anchor in builtin mode, the current
+feature branch in handoff mode.
 
 ```bash
-git checkout <config.branches.anchor>
+git checkout "$CHERRY_BASE"
 git cherry-pick <hash>
 ```
 
@@ -365,8 +386,8 @@ merge — they're a resume aid, not permanent state.
 
 ### Step 6 — Validate merged state
 
-Run from anchor checkout (NOT a worktree) after each wave. Iterate the configured
-verification gates and run each gate's command:
+Run from the `$CHERRY_BASE` checkout (NOT a worktree) after each wave. Iterate
+the configured verification gates and run each gate's command:
 
 ```bash
 {{config.db.client_generate}}        # only if {{config.db.tooling}} != none AND wave had schema changes
@@ -378,14 +399,16 @@ verification gates and run each gate's command:
 {{config.commands.build}}             # always, in addition to gates
 ```
 
-If the wave had schema changes, apply migrations from the anchor checkout (NOT a
-worktree):
+If the wave had schema changes, apply migrations from the `$CHERRY_BASE` checkout
+(NOT a worktree):
 
 ```bash
 {{config.db.migrate_apply}}
 ```
 
-(Skip the apply step if `config.db.tooling` is `none`.)
+Skip the apply step if any of:
+- `config.db.tooling` is `none`
+- `config.db.migrate_apply` is blank (project's CI/platform applies migrations)
 
 If validation fails after merge, fix inline on anchor branch. Common fixes:
 - Drop test fixtures referencing removed entities
@@ -397,14 +420,36 @@ If validation fails after merge, fix inline on anchor branch. Common fixes:
   ```
 - Kill stale dev server: `pkill -f "dev"` (or your project's equivalent)
 
-### Step 7 — Push
+### Step 7 — Push (or hand off)
+
+Behavior depends on `ship.mode`:
 
 ```bash
-git push origin {{config.branches.anchor}}
+if [[ "{{config.ship.mode}}" == "handoff" ]]; then
+  echo "✓ Build complete on $CHERRY_BASE."
+  echo ""
+  echo "Hand-off — small-factory will NOT push or merge in handoff mode."
+  echo "  Commits are on:  $CHERRY_BASE"
+  echo "  Anchor branch:   {{config.branches.anchor}} (untouched)"
+  echo "  No push happened."
+  if [ -n "{{config.ship.handoff_command}}" ]; then
+    echo "  Your next step:  {{config.ship.handoff_command}}"
+  else
+    echo "  Your next step:  push the branch and open a PR (or run your normal ship workflow)."
+  fi
+else
+  git push origin "$CHERRY_BASE"
+fi
 ```
 
-Add `--no-verify` only if the project has a known pre-push hook issue AND the
-validation in Step 6 is verified green. Document the bypass in the report if used.
+In builtin mode `$CHERRY_BASE` equals `{{config.branches.anchor}}` (today's
+behavior — push the anchor branch). In handoff mode no remote mutation
+happens; the commits sit on the current feature branch for the user's
+PR/CI/deploy pipeline to take over.
+
+Add `--no-verify` to the builtin-mode push only if the project has a known
+pre-push hook issue AND the validation in Step 6 is verified green. Document
+the bypass in the report if used.
 
 ### Step 8 — Update Linear per sub-issue
 
@@ -441,7 +486,81 @@ mcp__linear__save_issue
 
 For blocked sub-issues: leave status as **Todo**. Do not advance it.
 
+### Step 8.5 — Post handoff comment on parent issue (handoff mode only)
+
+In `ship.mode = handoff`, Build is the end of small-factory's involvement
+until the user comes back post-deploy. Post a comment on the **parent**
+issue that summarizes what's code-complete and points the user at their
+ship workflow. The exact template depends on whether any sub-issues are
+blocked.
+
+In `ship.mode = builtin`, skip this step. The corresponding "Shipped"
+comment for builtin mode is posted by Merge's Step 8.
+
+**If all sub-issues completed successfully — post "Handed off":**
+
+```
+mcp__linear__save_comment
+  issueId=<parent-issue-id>
+  body=<see template below>
+```
+
+```markdown
+## 🤝 Handed off
+
+**Feature branch:** `$CHERRY_BASE`
+**Anchor branch:** `{{config.branches.anchor}}` (untouched)
+**Handed off:** <date and time>
+
+small-factory finished code-complete work on `$CHERRY_BASE` and stopped.
+No merge, push, or migration apply happened — your PR review, CI, and
+deploy pipeline take over from this point.
+
+**Sub-issues code-complete:**
+- ✓ <issue-id>: <title>
+- ✓ <issue-id>: <title>
+
+**Deploy notes from the spec:**
+<From the spec's deploy notes section. If nothing needed: "No special action.">
+
+**Next steps:**
+<If ship.handoff_command set: "Run `<ship.handoff_command>` to start the ship workflow.">
+<Else: "Push the branch and open a PR; let your CI/deploy pipeline take it from here.">
+
+Once your deploy lands, tell small-factory:
+  `merge done for <parent-issue-id> to staging` (or `to production`)
+to mark sub-issues Done and post a Shipped comment.
+```
+
+**If some sub-issues are blocked — post "Partial handoff":**
+
+```markdown
+## 🤝 Partial handoff
+
+**Feature branch:** `$CHERRY_BASE`
+**Handed off:** <date and time>
+
+<X> of <Y> sub-issues are code-complete on `$CHERRY_BASE`. <Z> are blocked
+and need attention before this feature can fully ship.
+
+**Code-complete:**
+- ✓ <issue-id>: <title>
+
+**⚠ Blocked:**
+- <issue-id>: <title> — see sub-issue for details
+
+Resolve the blockers, then run `build it` again to pick up the remaining work.
+Once everything is code-complete and deployed, run `merge done for <parent-issue-id>`.
+```
+
+**Note: wave-summary files are NOT cleaned up here.** They live until Merge
+runs (post-deploy in handoff mode, post-merge in builtin mode), so Build
+remains safely re-runnable for the partial-handoff case (resolve a blocker
+→ run Build again → resumes from wave summaries on disk).
+
 ### Step 9 — Report to user
+
+Tail of the report depends on `ship.mode`. In **builtin** mode:
 
 ```
 ✓ Build complete. <X>/<Y> sub-issues shipped.
@@ -457,6 +576,26 @@ For blocked sub-issues: leave status as **Todo**. Do not advance it.
 
 → Shipped tickets are Code Complete in Linear.
 → Test the feature and tell me: "merge to <branch>" when ready.
+```
+
+In **handoff** mode:
+
+```
+✓ Build complete. <X>/<Y> sub-issues code-complete on $CHERRY_BASE.
+
+<issue-id> — <one line outcome>
+<issue-id> — <one line outcome>
+...
+
+<gate-1>: <result> | <gate-2>: <result> | build: <result>
+
+⚠ Blockers (<N> tickets need attention):
+- <issue-id>: <one line blocker summary> — see sub-issue for details
+
+→ Sub-issues are Code Complete in Linear; anchor branch ({{config.branches.anchor}}) untouched.
+→ Posted a <Handed off | Partial handoff> comment on the parent issue.
+→ Your next step: <ship.handoff_command or "push the branch and open a PR">.
+→ Once deploy lands, tell me "merge done for <parent-issue-id> to <target>" to close out Linear.
 ```
 
 ## Known pitfalls
