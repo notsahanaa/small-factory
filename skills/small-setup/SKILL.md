@@ -129,6 +129,20 @@ Scan the repo silently. Detect:
   - `alembic.ini` → alembic
   - any `migrations/*.sql` without the above → raw_sql
   - none of the above → none
+- **Migration creation command** — default by detected tooling:
+  - prisma → `npx prisma migrate dev --create-only --name <slug>`
+  - supabase → `supabase migration new <slug>`
+  - alembic → `alembic revision --autogenerate -m "<slug>"`
+  - sqlc / raw_sql / none → `""` (blank — agent will hand-write the migration file)
+  The literal `<slug>` placeholder is substituted by the Build stage agent at run time.
+- **Deploy platform** — by presence (informs the `ship.mode` default in Step 4):
+  - `vercel.json` or `.vercel/` → vercel
+  - `fly.toml` → fly
+  - `netlify.toml` → netlify
+  - `app.json` with Heroku block → heroku
+  - `railway.json` or `railway.toml` → railway
+  - `.github/workflows/*.yml` containing `deploy` or `release` → github-actions
+  - none of the above → none
 - **Worktree strategy** — based on package manager:
   - bun → symlink (`ln -s ../../../node_modules .`)
   - npm / yarn / pnpm → install
@@ -160,11 +174,13 @@ Show the user one screen with everything detected:
     build:      <build cmd>
 
   DB tooling:      <tool>            (from <evidence>)
-    migrate_apply:   <command>
-    client_generate: <command, or N/A>
+    migration_create: <command, or "hand-write (no creation command)">
+    migrate_apply:    <command>
+    client_generate:  <command, or N/A>
 
   Worktree strategy: <strategy>      (based on package manager)
   Cache clear paths: <paths>         (based on framework)
+  Deploy platform:   <platform>      (from <evidence>, or "none detected")
 
 Looks right? Reply "y" to accept, or tell me what to change
 (e.g. "test should be vitest", "no DB", "add ruff to verification").
@@ -176,18 +192,23 @@ If the user requests changes, apply them and re-present until they accept.
 and `package-lock.json`), present both as options and ask which is authoritative.
 Do not silently pick one.
 
-### Step 4 — Ask the 5 things that can't be detected
+### Step 4 — Ask the things that can't be detected
 
-**Ask one at a time, conversationally.** Do not dump all five in one
+**Ask one at a time, conversationally.** Do not dump all questions in one
 message — the user needs to be able to answer each in isolation, accept
 the default by replying "ok" / "enter" / etc., or edit one without
 re-typing the others.
 
 For each question below: show the prompt + the default value inline, wait
 for the user's response, then move to the next. Use **AskUserQuestion**
-for questions 2 (target branch — multiple choice) and 3 (branch prefix —
-multiple choice). Use **natural chat prompts** for questions 1, 4, 5
-(free-text or accept-default).
+for questions 2 (ship mode — multiple choice), 3 (target branch — multiple
+choice), and 4 (branch prefix — multiple choice). Use **natural chat
+prompts** for questions 1, 5, 6 (free-text or accept-default).
+
+**Default for question 2 (ship mode)** is derived from the detected deploy
+platform in Step 2: if any platform other than `none` was detected
+(vercel / fly / netlify / heroku / railway / github-actions), default to
+`handoff`. Otherwise default to `builtin`.
 
 The questions:
 
@@ -195,22 +216,41 @@ The questions:
 1. Linear team ID? (e.g. LEV, ACME)
    → [user types]
 
-2. Default target branch when you say "merge to staging"?
-   Options: main / staging / dev   [default: staging]
+2. Ship mode? How small-factory finishes a feature.
+   builtin  → small-factory pushes Build's commits to the integration branch
+              and performs the Merge stage's git-merge, push, and migration
+              apply itself. Right for solo work or projects where the robot
+              owns the integration branch.
+   handoff  → small-factory stops at code-complete on the current feature
+              branch. No push, no merge, no migration apply. Your PR review,
+              CI, and deploy platform take over from there. Right for teams
+              with branch protection, code review, or a managed-deploy
+              platform (Vercel / Fly / Heroku / Railway).
+   [default: <detected — see rule above>]
    → [user picks]
 
-3. Branch prefix format?
+   If handoff: optionally provide a one-line "next step" command that the
+   handoff message will display (e.g. "gh pr create" or "./ship.sh").
+   Blank is fine — a generic message will be shown.
+
+3. Default target branch when you ship (used only in ship.mode = builtin)?
+   Options: main / staging / dev / other   [default: staging]
+   → [user picks]
+   (Only consulted by builtin mode. In handoff mode this field is still
+    written but unused.)
+
+4. Branch prefix format?
    "<initials>/"  (e.g. dan/issue-547-people-db)
    none           (e.g. issue-547-people-db)
    [default: <initials>/]
    → [user picks; if prefix, ask for initials]
 
-4. Commit format?
+5. Commit format?
    Default: `<type>(<scope>): <summary> (<issue-id>, <parent-issue-id>)`
    [enter to accept, or edit]
    → [user accepts or edits]
 
-5. Verification gates (must all pass before commit)?
+6. Verification gates (must all pass before commit)?
    Default: [typecheck, lint, test]
    [enter to accept, or edit — names must match commands.* keys above]
    → [user accepts or edits]
@@ -284,9 +324,13 @@ project:
   slug: <auto-detected>
   linear_team_id: <user-provided>            # e.g. "LEV"
 
+ship:
+  mode: builtin                               # builtin | handoff
+  handoff_command: ""                         # optional — shown to user in handoff message (e.g. "gh pr create")
+
 branches:
   anchor: main                                # detected from origin/HEAD
-  target: staging                             # user-confirmed default
+  target: staging                             # used only when ship.mode = builtin
   prefix_format: "<initials>/"                # or "" for no prefix
   initials: "dan"                             # used in prefix; omit if no prefix
 
@@ -301,9 +345,12 @@ commands:
 
 db:
   tooling: prisma                             # prisma | supabase | sqlc | alembic | raw_sql | none
-  migrate_apply:   npx prisma migrate deploy
-  client_generate: npx prisma generate
-  worktree_rule:   "hand-write SQL; never run migrate dev in worktree"
+  migration_create: "npx prisma migrate dev --create-only --name <slug>"
+                                              # blank → agent hand-writes the migration file
+                                              # the literal "<slug>" is substituted at run time
+  migrate_apply:    npx prisma migrate deploy # blank → Merge skips apply (CI/platform handles it)
+  client_generate:  npx prisma generate
+  worktree_rule:    "hand-write SQL; never run migrate dev in worktree"
 
 worktree:
   node_modules_strategy: symlink              # symlink | install | none
@@ -319,7 +366,12 @@ verification_gates:                           # ordered; all must pass before co
 ```
 
 ### Omission rules
+- `ship.mode: handoff` → Build skips push (Step 7); Merge skips git-merge/push/migrate (Steps 3-5); Linear sub-issues marked Code Complete instead of Done
+- `ship.handoff_command: ""` → handoff message shows a generic "open a PR / run your ship workflow" instead of a specific command
+- `branches.target` → consulted only by builtin mode; written but unused under handoff
 - `db.tooling: none` → other `db.*` fields ignored by downstream stages
+- `db.migration_create: ""` → Build agents fall back to hand-writing the migration file per tooling convention
+- `db.migrate_apply: ""` → Merge's apply step is a clean skip (right setting for CI/platform-managed migrations)
 - `worktree.node_modules_strategy: none` → no install/symlink step in agent prompts
 - `worktree.cache_clear: []` → no cache clear step
 - `branches.prefix_format: ""` → branches are `<issue-id>-<slug>` with no prefix
