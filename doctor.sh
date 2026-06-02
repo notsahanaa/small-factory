@@ -42,15 +42,15 @@ fi
 
 # Linear MCP
 echo ""
-if [ -f "$HOME/.claude.json" ] && command -v jq >/dev/null 2>&1; then
-  if jq -e '.mcpServers | with_entries(select(.key | test("linear"; "i"))) | length > 0' "$HOME/.claude.json" >/dev/null 2>&1; then
+if command -v claude >/dev/null 2>&1; then
+  if claude mcp list 2>/dev/null | grep -qi linear; then
     echo "✓ Linear MCP configured"
   else
-    echo "✗ Linear MCP not found in ~/.claude.json"
+    echo "✗ Linear MCP not found (claude mcp list)"
     FAIL=1
   fi
 else
-  echo "ℹ  Cannot auto-check Linear MCP (no ~/.claude.json or no jq)"
+  echo "ℹ  Cannot auto-check Linear MCP (claude CLI not on PATH)"
 fi
 
 # Per-project config validity
